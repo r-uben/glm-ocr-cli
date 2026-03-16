@@ -1,0 +1,82 @@
+"""Configuration management for GLM-OCR CLI."""
+
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application settings with environment variable support."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="GLM_OCR_",
+        case_sensitive=False,
+    )
+
+    # Backend selection
+    backend: Literal["ollama", "vllm"] = Field(
+        default="ollama",
+        description="Backend to use: 'ollama' (local) or 'vllm' (OpenAI-compatible)",
+    )
+
+    # Model configuration
+    model_name: str = Field(
+        default="glm-ocr",
+        description="Model name (glm-ocr for Ollama, glm-ocr or zai-org/GLM-OCR for vLLM)",
+    )
+    ollama_url: str = Field(
+        default="http://localhost:11434",
+        description="Ollama API URL",
+    )
+    vllm_base_url: str = Field(
+        default="http://localhost:8080/v1",
+        description="vLLM OpenAI-compatible API URL",
+    )
+
+    # Image preprocessing
+    max_dimension: int = Field(
+        default=2048,
+        description="Maximum image dimension (width or height). Set to 0 to disable.",
+    )
+
+    # Output configuration
+    output_dir: Path = Field(
+        default=Path("output"),
+        description="Default output directory",
+    )
+    extract_images: bool = Field(
+        default=False,
+        description="Extract and save images from documents",
+    )
+    include_metadata: bool = Field(
+        default=True,
+        description="Include metadata in output markdown",
+    )
+
+    # Retry configuration
+    max_retries: int = Field(
+        default=3,
+        description="Maximum number of retries for transient backend errors",
+    )
+    retry_delay: float = Field(
+        default=1.0,
+        description="Base delay in seconds between retries (exponential backoff)",
+    )
+
+    # Logging
+    log_level: str = Field(
+        default="INFO",
+        description="Logging level",
+    )
+    verbose: bool = Field(
+        default=False,
+        description="Enable verbose output",
+    )
+
+
+# Global settings instance
+settings = Settings()
