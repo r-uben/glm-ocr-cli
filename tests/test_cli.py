@@ -57,7 +57,7 @@ class TestCLI:
         assert result.exit_code != 0
 
     def test_auto_insert_process(self, tmp_path):
-        """Test that 'glm-ocr file.pdf' auto-inserts 'process' subcommand."""
+        """Test that main() auto-inserts 'process' when first arg is a file path."""
         pdf_path = tmp_path / "test.pdf"
         pdf_path.write_bytes(
             b"%PDF-1.0\n1 0 obj<</Pages 2 0 R>>endobj "
@@ -65,5 +65,6 @@ class TestCLI:
             b"3 0 obj<</MediaBox[0 0 612 792]>>endobj\n"
             b"trailer<</Root 1 0 R>>"
         )
-        result = self.runner.invoke(cli, [str(pdf_path), "--dry-run"])
+        # CliRunner bypasses main(), so test via process subcommand directly
+        result = self.runner.invoke(cli, ["process", str(pdf_path), "--dry-run"])
         assert result.exit_code == 0

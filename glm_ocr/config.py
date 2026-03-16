@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     )
 
     # Backend selection
-    backend: Literal["ollama", "vllm"] = Field(
-        default="ollama",
-        description="Backend to use: 'ollama' (local) or 'vllm' (OpenAI-compatible)",
+    backend: Literal["transformers", "ollama", "vllm"] = Field(
+        default="transformers",
+        description="Backend: 'transformers' (local, default), 'ollama', or 'vllm'",
     )
 
     # Model configuration

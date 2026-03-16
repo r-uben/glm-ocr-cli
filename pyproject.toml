@@ -35,9 +35,15 @@ pymupdf = "^1.25.1"
 rich = "^13.9.4"
 requests = "^2.31.0"
 openai = {version = "^1.0.0", optional = true}
+torch = {version = "^2.0.0", optional = true}
+transformers = {version = "^5.0.0", optional = true}
+torchvision = {version = ">=0.15.0", optional = true}
+accelerate = {version = ">=1.0.0", optional = true}
 
 [tool.poetry.extras]
 vllm = ["openai"]
+transformers = ["torch", "transformers", "torchvision", "accelerate"]
+local = ["torch", "transformers", "torchvision", "accelerate"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.4"

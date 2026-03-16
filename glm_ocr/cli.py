@@ -173,9 +173,9 @@ def cli(ctx: click.Context) -> None:
 )
 @click.option(
     "--backend",
-    type=click.Choice(["ollama", "vllm"]),
+    type=click.Choice(["transformers", "ollama", "vllm"]),
     default=None,
-    help="Backend to use: 'ollama' (local, default) or 'vllm' (OpenAI-compatible). Can also set GLM_OCR_BACKEND env var.",
+    help="Backend: 'transformers' (local, default), 'ollama', or 'vllm'. Can also set GLM_OCR_BACKEND env var.",
 )
 @click.option(
     "--vllm-url",
@@ -363,8 +363,9 @@ def info() -> None:
     console.print("Documents: PDF\n")
 
     console.print("[bold]Backend Options:[/bold]")
-    console.print("  --backend ollama  Local processing (default)")
-    console.print("  --backend vllm    OpenAI-compatible API (GPU server)\n")
+    console.print("  --backend transformers  Local HuggingFace inference (default)")
+    console.print("  --backend ollama        Ollama server")
+    console.print("  --backend vllm          OpenAI-compatible API (GPU server)\n")
 
     console.print("[bold]Task Types:[/bold]")
     console.print("  --task text       General text recognition (default)")
