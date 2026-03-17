@@ -6,7 +6,7 @@ from glm_ocr.config import Settings
 class TestSettings:
     def test_defaults(self):
         s = Settings()
-        assert s.backend == "transformers"
+        assert s.backend == "ollama"
         assert s.model_name == "glm-ocr"
         assert s.ollama_url == "http://localhost:11434"
         assert s.vllm_base_url == "http://localhost:8080/v1"

@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     )
 
     # Backend selection
-    backend: Literal["transformers", "ollama", "vllm"] = Field(
-        default="transformers",
-        description="Backend: 'transformers' (local, default), 'ollama', or 'vllm'",
+    backend: Literal["ollama", "transformers", "vllm"] = Field(
+        default="ollama",
+        description="Backend: 'ollama' (local, default), 'transformers', or 'vllm'",
     )
 
     # Model configuration

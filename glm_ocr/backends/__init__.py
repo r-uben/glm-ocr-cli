@@ -14,7 +14,7 @@ __all__ = [
 
 
 def create_backend(
-    backend_type: str = "transformers",
+    backend_type: str = "ollama",
     model_name: str = "glm-ocr",
     max_dimension: int | None = None,
     max_retries: int | None = None,
