@@ -135,8 +135,21 @@ def ensure_dir(directory: Path) -> Path:
 # (math inequalities like ``<x>``, XML/HTML code examples, generic ``<tag ...>``)
 # survives. Matches an opening/closing tag for exactly one of these names.
 _HTML_FORMAT_TAGS = (
-    "b", "i", "u", "s", "em", "strong", "span", "div", "p", "br",
-    "sub", "sup", "mark", "small", "font",
+    "b",
+    "i",
+    "u",
+    "s",
+    "em",
+    "strong",
+    "span",
+    "div",
+    "p",
+    "br",
+    "sub",
+    "sup",
+    "mark",
+    "small",
+    "font",
 )
 _HTML_TAG_RE = re.compile(
     r"</?(?:" + "|".join(_HTML_FORMAT_TAGS) + r")(?:\s[^>]*)?/?>",
@@ -160,19 +173,19 @@ def clean_ocr_output(text: str, raw: bool = False) -> str:
 
     # Decode common HTML entities
     html_entities = {
-        '&amp;': '&',
-        '&lt;': '<',
-        '&gt;': '>',
-        '&quot;': '"',
-        '&apos;': "'",
-        '&nbsp;': ' ',
-        '&#39;': "'",
-        '&#x27;': "'",
+        "&amp;": "&",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&quot;": '"',
+        "&apos;": "'",
+        "&nbsp;": " ",
+        "&#39;": "'",
+        "&#x27;": "'",
     }
     for entity, char in html_entities.items():
         text = text.replace(entity, char)
 
     # Normalize excessive blank lines
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = text.strip()
     return text

@@ -75,8 +75,7 @@ class VLLMBackend(Backend):
                 )
         except Exception as e:
             raise RuntimeError(
-                f"Failed to connect to vLLM at {self.base_url}: {e}. "
-                "Is the vLLM server running?"
+                f"Failed to connect to vLLM at {self.base_url}: {e}. Is the vLLM server running?"
             )
 
         self.model = True
@@ -131,9 +130,7 @@ class VLLMBackend(Backend):
             raise TransientError(f"vLLM server error: {e}", original=e)
         except openai.APIStatusError as e:
             if e.status_code in {502, 503, 504}:
-                raise TransientError(
-                    f"vLLM HTTP {e.status_code}: {e}", original=e
-                )
+                raise TransientError(f"vLLM HTTP {e.status_code}: {e}", original=e)
             raise RuntimeError(f"vLLM API error (HTTP {e.status_code}): {e}")
 
     def process_image(

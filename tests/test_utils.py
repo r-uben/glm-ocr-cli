@@ -68,7 +68,7 @@ class TestSanitizeFilename:
         assert sanitize_filename("normal_file") == "normal_file"
 
     def test_special_chars(self):
-        assert sanitize_filename('file<>:name') == "file___name"
+        assert sanitize_filename("file<>:name") == "file___name"
 
     def test_empty(self):
         assert sanitize_filename("") == "untitled"

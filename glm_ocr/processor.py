@@ -145,9 +145,7 @@ class OCRProcessor:
                 mat = fitz.Matrix(zoom, zoom)
                 for page_num in range(len(pdf_document)):
                     pix = pdf_document[page_num].get_pixmap(matrix=mat)
-                    images.append(
-                        Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    )
+                    images.append(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
                 logger.info(f"Converted {len(images)} pages from {pdf_path.name}")
         except Exception as e:
             raise RuntimeError(f"Failed to convert PDF {pdf_path}: {e}") from e
@@ -253,9 +251,7 @@ class OCRProcessor:
             )
             return "", str(e)
 
-    def _analyze_figures(
-        self, figures: list[FigureInfo], show_progress: bool = True
-    ) -> None:
+    def _analyze_figures(self, figures: list[FigureInfo], show_progress: bool = True) -> None:
         """Populate figure descriptions in place."""
         if not figures:
             return
@@ -271,11 +267,12 @@ class OCRProcessor:
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
                 futures = {
-                    executor.submit(self._analyze_single_figure, fig): fig
-                    for fig in figures
+                    executor.submit(self._analyze_single_figure, fig): fig for fig in figures
                 }
                 pbar = (
-                    tqdm(total=len(figures), desc=f"Analyzing figures ({self.workers}w)", unit="fig")
+                    tqdm(
+                        total=len(figures), desc=f"Analyzing figures ({self.workers}w)", unit="fig"
+                    )
                     if show_progress and len(figures) > 1
                     else None
                 )
@@ -344,8 +341,7 @@ class OCRProcessor:
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
                 futures = {
-                    executor.submit(ocr_one, idx, image): idx
-                    for idx, image in enumerate(images, 1)
+                    executor.submit(ocr_one, idx, image): idx for idx, image in enumerate(images, 1)
                 }
                 pbar = (
                     tqdm(total=len(images), desc=f"OCR pages ({self.workers}w)", unit="page")
@@ -526,9 +522,7 @@ def process(
         result = processor.process_file(
             file_path, doc_dir, prompt=prompt, show_progress=show_progress
         )
-        meta, markdown_path = processor.write_document(
-            result, output_root, rel_key, doc_dir, index
-        )
+        meta, markdown_path = processor.write_document(result, output_root, rel_key, doc_dir, index)
         outcome.add(
             meta.status,
             detail=None if meta.status is Status.COMPLETED else rel_key,

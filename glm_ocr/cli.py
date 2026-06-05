@@ -344,9 +344,7 @@ def main() -> None:
         if first_non_option_index is not None:
             candidate = argv[first_non_option_index]
             if candidate not in known_subcommands and Path(candidate).exists():
-                argv = (
-                    argv[:first_non_option_index] + ["process"] + argv[first_non_option_index:]
-                )
+                argv = argv[:first_non_option_index] + ["process"] + argv[first_non_option_index:]
                 sys.argv = [sys.argv[0], *argv]
 
     cli(obj={})

@@ -46,6 +46,7 @@ class TransformersBackend(Backend):
             return self._device
         try:
             import torch
+
             if torch.cuda.is_available():
                 return "cuda"
             elif torch.backends.mps.is_available():
@@ -90,6 +91,7 @@ class TransformersBackend(Backend):
 
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             elif torch.backends.mps.is_available():
@@ -103,10 +105,15 @@ class TransformersBackend(Backend):
         """Run inference on a single image."""
         import torch
 
-        messages = [{"role": "user", "content": [
-            {"type": "image", "image": image},
-            {"type": "text", "text": prompt},
-        ]}]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
 
         inputs = self._processor.apply_chat_template(
             messages,
@@ -120,7 +127,7 @@ class TransformersBackend(Backend):
             output = self._model.generate(**inputs, max_new_tokens=8192)
 
         # Decode only the generated tokens (skip input)
-        generated = output[0][inputs["input_ids"].shape[1]:]
+        generated = output[0][inputs["input_ids"].shape[1] :]
         return self._processor.decode(generated, skip_special_tokens=True)
 
     def process_image(

@@ -1,6 +1,5 @@
 """Tests for GLM-OCR CLI."""
 
-
 from click.testing import CliRunner
 
 from glm_ocr.cli import cli
