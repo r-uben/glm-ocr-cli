@@ -41,6 +41,20 @@ glm-ocr paper.pdf --dry-run
 - **Ollama** (default): `glm-ocr document.pdf`
 - **vLLM**: `glm-ocr document.pdf --backend vllm --vllm-url http://localhost:8080/v1`
 
+## Output
+
+Output writing follows the shared [`ocr-output-contract`](https://github.com/r-uben/ocr-output-contract),
+so glm's output is byte-structure-identical to every sibling OCR engine:
+
+- Default output root is `<input-parent>/ocr/`; `-o`/`--output-dir` overrides it but is never required.
+- One aggregated `<root>/<rel/dir>/<stem>/<stem>.md` per document, mirroring the input subtree (so
+  same-basename files in different folders never collide), with every page under a `## Page N` header.
+- The markdown body is **clean** — no YAML frontmatter. All provenance lives in `metadata.json`
+  sidecars at two levels: a per-document `<stem>/metadata.json` and a rolled-up root index keyed by
+  input-relative path (`{status, checksum, model, backend, processing_time, timestamp, output_path, pages}`).
+- Failures are recorded with `status="failed"` (partial documents `status="partial"`), and the process
+  exits nonzero if any document or page failed.
+
 ## Configuration
 
 Environment variables (prefix `GLM_OCR_`):

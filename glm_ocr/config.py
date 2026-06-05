@@ -1,6 +1,5 @@
 """Configuration management for GLM-OCR CLI."""
 
-from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -43,18 +42,11 @@ class Settings(BaseSettings):
         description="Maximum image dimension (width or height). Set to 0 to disable.",
     )
 
-    # Output configuration
-    output_dir: Path = Field(
-        default=Path("output"),
-        description="Default output directory",
-    )
+    # Output configuration. The output ROOT defaults to <input-parent>/ocr/
+    # (computed by ocr-output-contract); it is not a configurable setting.
     extract_images: bool = Field(
         default=False,
-        description="Extract and save images from documents",
-    )
-    include_metadata: bool = Field(
-        default=True,
-        description="Include metadata in output markdown",
+        description="Extract and save full-page rasters under images/",
     )
 
     # Retry configuration

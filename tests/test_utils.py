@@ -95,8 +95,20 @@ class TestCleanOutput:
     def test_html_entities(self):
         assert clean_ocr_output("&amp; &lt; &gt;") == "& < >"
 
-    def test_html_tags(self):
+    def test_html_format_tags_stripped(self):
         assert clean_ocr_output("<b>bold</b>") == "bold"
+        assert clean_ocr_output("<em>x</em> <strong>y</strong>") == "x y"
+
+    def test_math_inequalities_preserved(self):
+        """SECONDARY fix: blanket <...> stripping killed math/XML; now preserved."""
+        assert clean_ocr_output("if a < b then a <x> 0") == "if a < b then a <x> 0"
+
+    def test_xml_and_code_preserved(self):
+        assert clean_ocr_output("<config value='1'>") == "<config value='1'>"
+        assert clean_ocr_output("<element>data</element>") == "<element>data</element>"
+
+    def test_raw_optout_skips_cleaning(self):
+        assert clean_ocr_output("<b>keep</b>\n\n\n\nx", raw=True) == "<b>keep</b>\n\n\n\nx"
 
     def test_excessive_newlines(self):
         assert clean_ocr_output("a\n\n\n\nb") == "a\n\nb"

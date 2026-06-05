@@ -4,7 +4,6 @@ import base64
 import io
 import logging
 from pathlib import Path
-from typing import Union
 
 from PIL import Image
 
@@ -139,7 +138,7 @@ class VLLMBackend(Backend):
 
     def process_image(
         self,
-        image: Union[Image.Image, Path, str],
+        image: Image.Image | Path | str,
         prompt: str | None = None,
         task: str = "text",
         return_raw: bool = False,

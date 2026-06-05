@@ -5,7 +5,6 @@ import random
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Union
 
 from PIL import Image
 
@@ -66,7 +65,7 @@ class Backend(ABC):
     @abstractmethod
     def process_image(
         self,
-        image: Union[Image.Image, Path, str],
+        image: Image.Image | Path | str,
         prompt: str | None = None,
         task: str = "text",
         return_raw: bool = False,
@@ -123,7 +122,7 @@ class Backend(ABC):
             results.append(result)
         return results
 
-    def describe_figure(self, image: Union[Image.Image, Path, str]) -> str:
+    def describe_figure(self, image: Image.Image | Path | str) -> str:
         """Generate a description of a figure/chart/diagram."""
         return self.process_image(
             image,

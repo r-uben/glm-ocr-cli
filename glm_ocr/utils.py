@@ -3,7 +3,6 @@
 import logging
 import re
 from pathlib import Path
-from typing import List
 
 from PIL import Image
 
@@ -14,7 +13,16 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | {PDF_EXTENSION}
 
 
 def setup_logging(level: str = "WARNING", verbose: bool = False) -> logging.Logger:
-    log_level = logging.DEBUG if verbose else logging.WARNING
+    """Configure root logging.
+
+    ``--verbose`` forces DEBUG; otherwise the ``level`` argument is honored (so
+    ``GLM_OCR_LOG_LEVEL`` / ``settings.log_level`` actually takes effect — the
+    audit found the level was previously discarded).
+    """
+    if verbose:
+        log_level = logging.DEBUG
+    else:
+        log_level = getattr(logging, str(level).upper(), logging.WARNING)
 
     logging.basicConfig(
         level=log_level,
@@ -37,11 +45,11 @@ def is_pdf_file(file_path: Path) -> bool:
     return file_path.suffix.lower() == PDF_EXTENSION
 
 
-def collect_files(input_path: Path, recursive: bool = False) -> List[Path]:
+def collect_files(input_path: Path, recursive: bool = False) -> list[Path]:
     if not input_path.exists():
         raise FileNotFoundError(f"Path not found: {input_path}")
 
-    files: List[Path] = []
+    files: list[Path] = []
 
     if input_path.is_file():
         if is_supported_file(input_path):
@@ -122,11 +130,33 @@ def ensure_dir(directory: Path) -> Path:
     return directory
 
 
-def clean_ocr_output(text: str) -> str:
-    """Clean GLM-OCR output. The model outputs relatively clean markdown,
-    but we still normalize whitespace and strip residual artifacts."""
-    # Strip any residual HTML tags
-    text = re.sub(r'<[^>]+>', '', text)
+# Inline HTML formatting tags the model occasionally emits as wrappers. Only
+# these are stripped, so legitimate angle-bracket content the OCR must preserve
+# (math inequalities like ``<x>``, XML/HTML code examples, generic ``<tag ...>``)
+# survives. Matches an opening/closing tag for exactly one of these names.
+_HTML_FORMAT_TAGS = (
+    "b", "i", "u", "s", "em", "strong", "span", "div", "p", "br",
+    "sub", "sup", "mark", "small", "font",
+)
+_HTML_TAG_RE = re.compile(
+    r"</?(?:" + "|".join(_HTML_FORMAT_TAGS) + r")(?:\s[^>]*)?/?>",
+    re.IGNORECASE,
+)
+
+
+def clean_ocr_output(text: str, raw: bool = False) -> str:
+    """Clean GLM-OCR output: normalize whitespace and strip residual artifacts.
+
+    GLM-OCR emits relatively clean markdown. We strip only a known set of inline
+    HTML formatting tags (the audit flagged that blanket ``<...>`` stripping
+    deleted legitimate math inequalities and XML/code). ``raw=True`` skips all
+    cleaning and returns the model output verbatim.
+    """
+    if raw:
+        return text
+
+    # Strip only known inline HTML formatting tags, not arbitrary <...> spans.
+    text = _HTML_TAG_RE.sub("", text)
 
     # Decode common HTML entities
     html_entities = {

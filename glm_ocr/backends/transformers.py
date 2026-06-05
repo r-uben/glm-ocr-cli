@@ -2,11 +2,10 @@
 
 import logging
 from pathlib import Path
-from typing import Union
 
 from PIL import Image
 
-from glm_ocr.backends.base import Backend, TransientError
+from glm_ocr.backends.base import Backend
 from glm_ocr.config import settings
 from glm_ocr.utils import clean_ocr_output, resize_image_if_needed
 
@@ -126,7 +125,7 @@ class TransformersBackend(Backend):
 
     def process_image(
         self,
-        image: Union[Image.Image, Path, str],
+        image: Image.Image | Path | str,
         prompt: str | None = None,
         task: str = "text",
         return_raw: bool = False,
