@@ -1,6 +1,5 @@
 """Configuration management for GLM-OCR CLI."""
 
-from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -15,6 +14,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="GLM_OCR_",
         case_sensitive=False,
+        # Tolerate stale/removed keys in a user's .env (e.g. the dropped
+        # GLM_OCR_OUTPUT_DIR / GLM_OCR_INCLUDE_METADATA fields). pydantic-settings
+        # defaults to extra="forbid"; since Settings() runs at import time, a
+        # forbidden extra key would raise a ValidationError on EVERY command
+        # (even --help) and crash the CLI for any existing user on upgrade.
+        extra="ignore",
     )
 
     # Backend selection
@@ -43,18 +48,11 @@ class Settings(BaseSettings):
         description="Maximum image dimension (width or height). Set to 0 to disable.",
     )
 
-    # Output configuration
-    output_dir: Path = Field(
-        default=Path("output"),
-        description="Default output directory",
-    )
+    # Output configuration. The output ROOT defaults to <input-parent>/ocr/
+    # (computed by ocr-output-contract); it is not a configurable setting.
     extract_images: bool = Field(
         default=False,
-        description="Extract and save images from documents",
-    )
-    include_metadata: bool = Field(
-        default=True,
-        description="Include metadata in output markdown",
+        description="Extract and save full-page rasters under images/",
     )
 
     # Retry configuration

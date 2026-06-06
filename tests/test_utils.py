@@ -51,16 +51,45 @@ class TestCollectFiles:
         assert len(files) == 2
 
     def test_recursive(self, tmp_path):
+        """Directory inputs are always walked recursively now."""
         sub = tmp_path / "sub"
         sub.mkdir()
         (tmp_path / "a.pdf").touch()
         (sub / "b.pdf").touch()
-        files = collect_files(tmp_path, recursive=True)
+        files = collect_files(tmp_path)
         assert len(files) == 2
 
     def test_empty_raises(self, tmp_path):
         with pytest.raises(ValueError):
             collect_files(tmp_path)
+
+    def test_excludes_resolved_output_root(self, tmp_path):
+        """The resolved output subtree is pruned so saved PNG/MD outputs from a
+        prior run are never re-ingested as fresh inputs (HIGH self-ingestion)."""
+        # A real input plus a prior-run output tree under the default <input>/ocr/.
+        (tmp_path / "paper.pdf").touch()
+        ocr_dir = tmp_path / "ocr" / "paper" / "images"
+        ocr_dir.mkdir(parents=True)
+        (ocr_dir / "page_0001.png").touch()
+        (tmp_path / "ocr" / "paper" / "paper.md").touch()
+        figures = tmp_path / "ocr" / "paper" / "figures"
+        figures.mkdir(parents=True)
+        (figures / "figure_1_page1.png").touch()
+
+        files = collect_files(tmp_path)
+        # Only the real input survives; nothing under <input>/ocr/ is discovered.
+        assert [f.name for f in files] == ["paper.pdf"]
+
+    def test_excludes_custom_output_root_inside_input(self, tmp_path):
+        """A custom -o dir inside the input tree is also pruned (resolved-path
+        match, not a literal 'ocr' name match)."""
+        (tmp_path / "paper.pdf").touch()
+        out = tmp_path / "results"
+        (out / "paper").mkdir(parents=True)
+        (out / "paper" / "fig.png").touch()
+
+        files = collect_files(tmp_path, output_dir=out)
+        assert [f.name for f in files] == ["paper.pdf"]
 
 
 class TestSanitizeFilename:
@@ -68,7 +97,7 @@ class TestSanitizeFilename:
         assert sanitize_filename("normal_file") == "normal_file"
 
     def test_special_chars(self):
-        assert sanitize_filename('file<>:name') == "file___name"
+        assert sanitize_filename("file<>:name") == "file___name"
 
     def test_empty(self):
         assert sanitize_filename("") == "untitled"
@@ -95,8 +124,20 @@ class TestCleanOutput:
     def test_html_entities(self):
         assert clean_ocr_output("&amp; &lt; &gt;") == "& < >"
 
-    def test_html_tags(self):
+    def test_html_format_tags_stripped(self):
         assert clean_ocr_output("<b>bold</b>") == "bold"
+        assert clean_ocr_output("<em>x</em> <strong>y</strong>") == "x y"
+
+    def test_math_inequalities_preserved(self):
+        """SECONDARY fix: blanket <...> stripping killed math/XML; now preserved."""
+        assert clean_ocr_output("if a < b then a <x> 0") == "if a < b then a <x> 0"
+
+    def test_xml_and_code_preserved(self):
+        assert clean_ocr_output("<config value='1'>") == "<config value='1'>"
+        assert clean_ocr_output("<element>data</element>") == "<element>data</element>"
+
+    def test_raw_optout_skips_cleaning(self):
+        assert clean_ocr_output("<b>keep</b>\n\n\n\nx", raw=True) == "<b>keep</b>\n\n\n\nx"
 
     def test_excessive_newlines(self):
         assert clean_ocr_output("a\n\n\n\nb") == "a\n\nb"

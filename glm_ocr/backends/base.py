@@ -5,7 +5,6 @@ import random
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Union
 
 from PIL import Image
 
@@ -66,7 +65,7 @@ class Backend(ABC):
     @abstractmethod
     def process_image(
         self,
-        image: Union[Image.Image, Path, str],
+        image: Image.Image | Path | str,
         prompt: str | None = None,
         task: str = "text",
         return_raw: bool = False,
@@ -93,7 +92,7 @@ class Backend(ABC):
             except TransientError as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    delay = self.retry_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                    delay = self.retry_delay * (2**attempt) + random.uniform(0, 0.5)
                     logger.warning(
                         f"[{self.backend_name}] Transient error (attempt {attempt + 1}/"
                         f"{self.max_retries + 1}): {e}. Retrying in {delay:.1f}s..."
@@ -103,9 +102,7 @@ class Backend(ABC):
                     logger.error(
                         f"[{self.backend_name}] Max retries ({self.max_retries}) exhausted: {e}"
                     )
-        raise RuntimeError(
-            f"Max retries ({self.max_retries}) exhausted: {last_error}"
-        )
+        raise RuntimeError(f"Max retries ({self.max_retries}) exhausted: {last_error}")
 
     def process_images_batch(
         self,
@@ -123,7 +120,7 @@ class Backend(ABC):
             results.append(result)
         return results
 
-    def describe_figure(self, image: Union[Image.Image, Path, str]) -> str:
+    def describe_figure(self, image: Image.Image | Path | str) -> str:
         """Generate a description of a figure/chart/diagram."""
         return self.process_image(
             image,

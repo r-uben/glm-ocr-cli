@@ -1,12 +1,12 @@
 """Transformers backend for GLM-OCR (local HuggingFace inference)."""
 
 import logging
+import threading
 from pathlib import Path
-from typing import Union
 
 from PIL import Image
 
-from glm_ocr.backends.base import Backend, TransientError
+from glm_ocr.backends.base import Backend
 from glm_ocr.config import settings
 from glm_ocr.utils import clean_ocr_output, resize_image_if_needed
 
@@ -35,6 +35,13 @@ class TransformersBackend(Backend):
         self._device = device
         self._model = None
         self._processor = None
+        # A single HuggingFace model/processor instance is shared across all
+        # callers; ``model.generate()`` is NOT thread-safe. With --workers>1 the
+        # processor fans page OCR (and figure analysis) out to a ThreadPoolExecutor
+        # that all hit this one model, so serialize inference behind a lock to
+        # avoid corrupted/garbled output. The HTTP backends (ollama/vllm) are
+        # stateless per request and need no such guard.
+        self._generate_lock = threading.Lock()
         logger.info(f"Initialized TransformersBackend with model: {self.model_name}")
 
     @property
@@ -47,6 +54,7 @@ class TransformersBackend(Backend):
             return self._device
         try:
             import torch
+
             if torch.cuda.is_available():
                 return "cuda"
             elif torch.backends.mps.is_available():
@@ -91,6 +99,7 @@ class TransformersBackend(Backend):
 
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             elif torch.backends.mps.is_available():
@@ -101,32 +110,42 @@ class TransformersBackend(Backend):
         logger.info("Model unloaded")
 
     def _generate(self, image: Image.Image, prompt: str) -> str:
-        """Run inference on a single image."""
+        """Run inference on a single image.
+
+        Serialized behind ``self._generate_lock`` because the shared model is not
+        thread-safe under --workers>1 (see ``__init__``).
+        """
         import torch
 
-        messages = [{"role": "user", "content": [
-            {"type": "image", "image": image},
-            {"type": "text", "text": prompt},
-        ]}]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
 
-        inputs = self._processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(self._model.device)
+        with self._generate_lock:
+            inputs = self._processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(self._model.device)
 
-        with torch.inference_mode():
-            output = self._model.generate(**inputs, max_new_tokens=8192)
+            with torch.inference_mode():
+                output = self._model.generate(**inputs, max_new_tokens=8192)
 
-        # Decode only the generated tokens (skip input)
-        generated = output[0][inputs["input_ids"].shape[1]:]
-        return self._processor.decode(generated, skip_special_tokens=True)
+            # Decode only the generated tokens (skip input)
+            generated = output[0][inputs["input_ids"].shape[1] :]
+            return self._processor.decode(generated, skip_special_tokens=True)
 
     def process_image(
         self,
-        image: Union[Image.Image, Path, str],
+        image: Image.Image | Path | str,
         prompt: str | None = None,
         task: str = "text",
         return_raw: bool = False,

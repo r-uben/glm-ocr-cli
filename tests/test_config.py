@@ -19,3 +19,18 @@ class TestSettings:
         s = Settings()
         assert s.backend == "vllm"
         assert s.model_name == "custom-model"
+
+    def test_stale_env_var_does_not_crash(self, monkeypatch):
+        """HIGH (migration regression): a removed field still present in a user's
+        .env must NOT raise a pydantic ValidationError. Settings() runs at import
+        time, so without extra="ignore" a stale GLM_OCR_OUTPUT_DIR (dropped in the
+        canon migration) would crash EVERY command, including --help.
+        """
+        # Previously-documented, now-removed fields:
+        monkeypatch.setenv("GLM_OCR_OUTPUT_DIR", "/some/old/path")
+        monkeypatch.setenv("GLM_OCR_INCLUDE_METADATA", "false")
+        monkeypatch.setenv("GLM_OCR_TOTALLY_UNKNOWN_KEY", "whatever")
+        # Must construct cleanly (no ValidationError) and ignore the extras.
+        s = Settings()
+        assert s.backend == "ollama"
+        assert not hasattr(s, "output_dir")

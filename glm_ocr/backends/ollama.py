@@ -4,7 +4,6 @@ import base64
 import io
 import logging
 from pathlib import Path
-from typing import Union
 
 import requests
 from PIL import Image
@@ -114,9 +113,7 @@ class OllamaBackend(Backend):
         except requests.exceptions.Timeout as e:
             raise TransientError("Ollama request timed out", original=e)
         except requests.exceptions.ConnectionError as e:
-            raise TransientError(
-                f"Lost connection to Ollama at {self.ollama_url}", original=e
-            )
+            raise TransientError(f"Lost connection to Ollama at {self.ollama_url}", original=e)
 
         if response.status_code in _TRANSIENT_STATUS_CODES:
             raise TransientError(
@@ -130,7 +127,7 @@ class OllamaBackend(Backend):
 
     def process_image(
         self,
-        image: Union[Image.Image, Path, str],
+        image: Image.Image | Path | str,
         prompt: str | None = None,
         task: str = "text",
         return_raw: bool = False,
