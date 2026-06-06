@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from ocr_output_contract import (
     Status,
     assemble_pages,
     doc_dir_for,
+    failure_checksum,
     figure_filename,
     figure_markdown_link,
     figures_dir_for,
@@ -55,6 +57,55 @@ if TYPE_CHECKING:
     from glm_ocr.backends.base import Backend
 
 logger = logging.getLogger(__name__)
+
+#: Inline markdown image link ``![alt](target)`` — mirrors the conformance
+#: harness's own pattern so the cached-skip side-output check enforces exactly
+#: what :func:`ocr_output_contract.conformance.assert_conforms` would reject.
+_IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+
+
+def _is_external_link(target: str) -> bool:
+    """True for link targets that are NOT local files (URLs, data URIs, anchors)."""
+    lowered = target.lower()
+    return "://" in lowered or lowered.startswith(("http:", "https:", "data:", "mailto:", "#"))
+
+
+def _markdown_side_outputs_intact(markdown_path: Path) -> bool:
+    """True if every local inline image link in ``markdown_path`` resolves on disk.
+
+    A cached skip trusts :meth:`RootIndex.is_completed`, which re-validates only
+    the markdown body's existence — never the figure/image side outputs it
+    references. So a figure PNG deleted (or never re-synced) after a completed
+    run leaves a DANGLING inline link that the v0.1.3 conformance harness
+    rejects, yet the doc would be skipped and exit 0. This re-derives the same
+    local-image-link resolution the harness uses; a False result tells
+    :func:`process` to reprocess instead of skip. A missing/unreadable markdown
+    file also returns False (treat as needing reprocessing).
+    """
+    try:
+        text = markdown_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    base = markdown_path.parent
+    for raw in _IMAGE_LINK_RE.findall(text):
+        target = raw.strip()
+        # Strip an optional markdown title: ![](path "Title") / ![](path 'Title').
+        for quote in ('"', "'"):
+            qpos = target.find(f" {quote}")
+            if qpos != -1:
+                target = target[:qpos].strip()
+                break
+        # Strip surrounding angle brackets: ![](<path with spaces>).
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1].strip()
+        if not target or _is_external_link(target):
+            continue
+        target = target.split("#", 1)[0].split("?", 1)[0]
+        if not target:
+            continue
+        if not (base / target).resolve().exists():
+            return False
+    return True
 
 
 @dataclass
@@ -175,9 +226,21 @@ class OCRProcessor:
         for idx, image in enumerate(images, 1):
             image.save(images_dir / f"page_{idx:04d}.png", "PNG")
 
-    def _extract_figures_from_pdf(self, pdf_path: Path) -> list[FigureInfo]:
-        """Extract embedded raster figures from a PDF (each guarded independently)."""
+    def _extract_figures_from_pdf(self, pdf_path: Path) -> tuple[list[FigureInfo], list[str]]:
+        """Extract embedded raster figures from a PDF.
+
+        Returns ``(figures, extraction_errors)``. Each per-image extraction is
+        guarded independently so one undecodable image cannot abort the document
+        (those are logged, not surfaced — a single bad embedded image is not a
+        document-level failure of the requested channel). But a *wholesale*
+        extraction crash (the ``fitz.open`` / page-walk body raising) is a
+        failure of the entire requested figure channel: it is surfaced in
+        ``extraction_errors`` so the caller can degrade the doc to ``partial``
+        instead of silently recording ``completed``/exit 0 with an empty figure
+        list (the HIGH "silent loss of the requested figure channel" bug).
+        """
         figures: list[FigureInfo] = []
+        extraction_errors: list[str] = []
         try:
             with fitz.open(pdf_path) as doc:
                 for page_num in range(len(doc)):
@@ -224,7 +287,8 @@ class OCRProcessor:
             logger.info(f"Extracted {len(figures)} figures from {pdf_path.name}")
         except Exception as e:
             logger.error(f"Failed to extract figures from {pdf_path}: {e}")
-        return figures
+            extraction_errors.append(f"figure extraction failed: {e}")
+        return figures, extraction_errors
 
     def _save_figures(self, figures: list[FigureInfo], doc_dir: Path) -> list[str]:
         """Save figures as PNG under the canonical ``figures/figure_<N>_page<P>.png``.
@@ -429,7 +493,13 @@ class OCRProcessor:
                 figures_md = ""
                 figure_errors: list[str] = []
                 if self.analyze_figures:
-                    figures = self._extract_figures_from_pdf(file_path)
+                    figures, extraction_errors = self._extract_figures_from_pdf(file_path)
+                    # A WHOLESALE extraction crash (extraction_errors non-empty)
+                    # must degrade the doc even when no figures came back — the
+                    # user asked for the figure channel and it was lost. Folded
+                    # in unconditionally so an empty figure list from a crash is
+                    # never a silent completed/exit 0.
+                    figure_errors.extend(extraction_errors)
                     if figures:
                         figure_errors.extend(self._save_figures(figures, doc_dir))
                         figure_errors.extend(
@@ -527,7 +597,11 @@ class OCRProcessor:
         # Checksum the input WITHOUT raising: if the source became unreadable
         # (the SYS-02 path), still persist a status=failed record rather than
         # letting the failure-metadata write itself throw and abort the batch.
-        checksum = safe_checksum(result.source) or "sha256:unreadable"
+        # failure_checksum returns the real digest when readable, else the
+        # canonical UNREADABLE_CHECKSUM sentinel (a VALID sha256: value the
+        # conformance schema accepts, unlike the old "sha256:unreadable" stub),
+        # which can never equal a real digest so a later readable run reprocesses.
+        checksum = failure_checksum(result.source)
         return DocMetadata(
             status=status,
             checksum=checksum,
@@ -646,11 +720,22 @@ def process(
             continue
 
         if not reprocess and index.is_completed(rel_key, checksum, fingerprint=fingerprint):
-            logger.info(f"skip {rel_key} (already completed; use --reprocess)")
-            # Emit the existing .md path even on a cached skip so quiet-mode
-            # scripting (`glm-ocr dir -q | xargs ...`) still sees every doc.
-            outcome.add(Status.COMPLETED, output_path=str(markdown_path))
-            continue
+            # is_completed re-validates only the markdown body, not the figure /
+            # image side outputs the body links to. A deleted/dangling figure
+            # leaves a body referencing a missing file (which the v0.1.3
+            # conformance harness rejects), so verify those side outputs are
+            # intact before honoring the skip; otherwise fall through and
+            # reprocess to regenerate them.
+            if _markdown_side_outputs_intact(markdown_path):
+                logger.info(f"skip {rel_key} (already completed; use --reprocess)")
+                # Emit the existing .md path even on a cached skip so quiet-mode
+                # scripting (`glm-ocr dir -q | xargs ...`) still sees every doc.
+                outcome.add(Status.COMPLETED, output_path=str(markdown_path))
+                continue
+            logger.warning(
+                f"reprocess {rel_key}: cached output references a missing figure/image "
+                f"side output (dangling inline link); regenerating"
+            )
 
         result = processor.process_file(
             file_path, doc_dir, prompt=prompt, show_progress=show_progress

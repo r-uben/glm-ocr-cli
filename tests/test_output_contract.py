@@ -253,6 +253,56 @@ def test_reprocess_idempotency(tmp_path):
     assert len(b3.tasks_seen) == 1
 
 
+def test_deleted_figure_forces_reprocess_not_skip(tmp_path):
+    """HIGH: a cached skip re-validates only the markdown, so a deleted figure PNG
+    leaves the body referencing a missing file (which the v0.1.3 conformance
+    harness rejects) yet the doc would skip and exit 0.
+
+    After a completed --analyze-figures run, deleting a referenced figure PNG
+    must force a REPROCESS on the next run (not a skip), regenerating the figure
+    so the body's inline link resolves again.
+    """
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf_with_figure(pdf)
+    out = tmp_path / "out"
+
+    b1 = FakeBackend()
+    out1 = process(pdf, b1, output_dir=out, analyze_figures=True, show_progress=False)
+    assert out1.exit_code == 0
+    first_calls = len(b1.tasks_seen)
+    assert first_calls >= 1
+
+    # The completed run wrote a figure PNG the markdown links to.
+    figures_dir = out / "doc" / "figures"
+    fig_pngs = list(figures_dir.glob("*.png"))
+    assert fig_pngs, "expected --analyze-figures to write a figure PNG"
+    body = (out / "doc" / "doc.md").read_text()
+    assert "figures/" in body, "the body should reference the figure inline"
+
+    # Sanity: an unchanged re-run is skipped (no new backend calls).
+    b_skip = FakeBackend()
+    out_skip = process(pdf, b_skip, output_dir=out, analyze_figures=True, show_progress=False)
+    assert b_skip.tasks_seen == [], "unchanged re-run must still be skipped"
+    assert out_skip.exit_code == 0
+
+    # Now DELETE the figure PNG -> the body has a dangling inline link.
+    for png in fig_pngs:
+        png.unlink()
+
+    # Re-run: the cached skip must NOT fire (the side output is gone); the doc is
+    # reprocessed, the backend is called again, and the figure is regenerated.
+    b2 = FakeBackend()
+    out2 = process(pdf, b2, output_dir=out, analyze_figures=True, show_progress=False)
+    assert len(b2.tasks_seen) >= 1, "a deleted figure must force reprocess, not skip"
+    assert list(figures_dir.glob("*.png")), "reprocess must regenerate the figure PNG"
+    # And the regenerated output conforms (no dangling inline link remains).
+    assert_conforms(
+        out,
+        [ExpectedDoc(rel_key="doc.pdf", pages=1, status="completed")],
+        require_failures_nonzero_exit=out2.exit_code != 0,
+    )
+
+
 def test_rerun_under_different_task_reprocesses(tmp_path):
     """Run-fingerprint idempotency: a re-run under a different --task does NOT
     silently reuse the prior output (it reprocesses)."""
@@ -562,6 +612,51 @@ def test_figure_save_failure_degrades_status_and_exits_nonzero(tmp_path, monkeyp
     assert doc_meta["status"] == "partial"
     assert doc_meta.get("error"), "the partial must carry a non-empty diagnostic"
     assert "save failed" in doc_meta["error"]
+
+
+def test_figure_extraction_wholesale_crash_degrades_status_and_exits_nonzero(tmp_path, monkeypatch):
+    """HIGH: a WHOLESALE figure-extraction crash under --analyze-figures must NOT
+    be a silent completed/exit 0.
+
+    The figure-extraction body crashes entirely (not a single bad image): it
+    returns no figures, so the old ``if figures:`` guard never degraded the doc
+    and the run recorded ``completed``/exit 0 — silently dropping the requested
+    figure channel. The fix surfaces the crash as an extraction error folded into
+    ``figure_errors`` unconditionally, so the doc degrades to ``partial`` with a
+    diagnostic and the run exits nonzero.
+    """
+    import glm_ocr.processor as proc
+
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf_with_figure(pdf)
+    out = tmp_path / "out"
+
+    real_open = proc.fitz.open
+    calls = {"n": 0}
+
+    def flaky_open(*args, **kwargs):
+        # 1st open = _pdf_to_images (page rendering): must succeed.
+        # 2nd open = _extract_figures_from_pdf: crash the whole extraction body.
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("PDF figure extraction backend crashed (simulated)")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(proc.fitz, "open", flaky_open)
+
+    outcome = process(pdf, FakeBackend(), output_dir=out, analyze_figures=True, show_progress=False)
+
+    # Pages OCR cleanly but the entire figure channel was lost -> partial, NOT
+    # a silent completed; nonzero exit; a non-empty diagnostic naming the crash.
+    assert outcome.exit_code != 0, "a wholesale figure-extraction crash must drive a nonzero exit"
+    assert_conforms(
+        out,
+        [ExpectedDoc(rel_key="doc.pdf", pages=1, status="partial")],
+        require_failures_nonzero_exit=True,
+    )
+    doc_meta = json.loads((out / "doc" / "metadata.json").read_text())
+    assert doc_meta["status"] == "partial"
+    assert "figure extraction failed" in (doc_meta.get("error") or "")
 
 
 def test_figure_analysis_failure_degrades_status_and_exits_nonzero(tmp_path):
