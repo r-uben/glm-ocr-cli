@@ -41,7 +41,7 @@ from ocr_output_contract import (
     relative_key,
     resolve_output_root,
     run_fingerprint,
-    sha256_checksum,
+    safe_checksum,
     utc_timestamp,
     write_doc_metadata,
 )
@@ -78,8 +78,11 @@ class DocResult:
 
     ``pages`` holds the per-page markdown in order; ``page_errors`` maps a
     1-indexed page number to its error string for any page that failed (or whose
-    model response was empty). ``status`` maps to the contract enum so a markdown
-    full of error stubs can never be recorded as ``completed``.
+    model response was empty). ``figure_errors`` lists the failures from the
+    opt-in figure path (a figure that could not be SAVED, or, under
+    ``--analyze-figures``, a caption the model could not produce). ``status`` maps
+    to the contract enum so a markdown full of error stubs — OR a doc whose
+    explicitly-requested figures failed — can never be recorded as ``completed``.
     """
 
     source: Path
@@ -87,6 +90,7 @@ class DocResult:
     figures_md: str = ""
     processing_time: float = 0.0
     page_errors: dict[int, str] = field(default_factory=dict)
+    figure_errors: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -95,11 +99,21 @@ class DocResult:
 
     @property
     def status(self) -> Status:
-        """``completed`` = every page ok; ``partial`` = some ok; ``failed`` = none."""
+        """Status across BOTH the page-OCR channel and the figure channel.
+
+        ``failed`` if a doc-level error left no pages, or no page succeeded;
+        ``partial`` if some (but not all) pages succeeded, OR every page
+        succeeded but a requested figure save/analysis failed (the failure must
+        be VISIBLE in status/exit, never a silent ``completed``); ``completed``
+        only when every page AND every requested figure succeeded.
+        """
         if self.error is not None and not self.pages:
             return Status.FAILED
         if self.pages and not self.page_errors and self.error is None:
-            return Status.COMPLETED
+            # All pages clean — but a figure-channel failure still degrades the
+            # doc to partial so the user who asked for figures is not told the
+            # run "completed" while a figure was lost / could not be described.
+            return Status.PARTIAL if self.figure_errors else Status.COMPLETED
         succeeded = self.page_count - len(self.page_errors)
         if succeeded > 0:
             return Status.PARTIAL
@@ -212,24 +226,32 @@ class OCRProcessor:
             logger.error(f"Failed to extract figures from {pdf_path}: {e}")
         return figures
 
-    def _save_figures(self, figures: list[FigureInfo], doc_dir: Path) -> None:
+    def _save_figures(self, figures: list[FigureInfo], doc_dir: Path) -> list[str]:
         """Save figures as PNG under the canonical ``figures/figure_<N>_page<P>.png``.
 
         Each save is guarded so one undecodable image cannot abort the document;
         figures are always normalised to PNG (canon §4), so PyMuPDF native exts
         like ``jpx``/``jb2`` that PIL cannot write are never an issue.
+
+        Returns the list of human-readable save-failure messages. A failure here
+        is NOT swallowed silently: the caller folds these into the doc's
+        ``figure_errors`` so the document is recorded ``partial`` (not a silent
+        ``completed``) and the run exits nonzero — the user asked for figures and
+        one was lost on disk.
         """
         figures_dir = figures_dir_for(doc_dir)
         figures_dir.mkdir(parents=True, exist_ok=True)
+        errors: list[str] = []
         for fig in figures:
             fig_path = figures_dir / figure_filename(fig.figure_num, fig.page_num)
             try:
                 fig.image.save(fig_path, "PNG")
                 fig.saved_path = fig_path
             except Exception as e:
-                logger.warning(
-                    f"Failed to save figure {fig.figure_num} on page {fig.page_num}: {e}"
-                )
+                msg = f"figure {fig.figure_num} on page {fig.page_num}: save failed: {e}"
+                logger.warning(msg)
+                errors.append(msg)
+        return errors
 
     def _analyze_single_figure(self, figure: FigureInfo) -> tuple[str, str | None]:
         """Analyze one figure. Returns (description, error)."""
@@ -254,10 +276,18 @@ class OCRProcessor:
             )
             return "", str(e)
 
-    def _analyze_figures(self, figures: list[FigureInfo], show_progress: bool = True) -> None:
-        """Populate figure descriptions in place."""
+    def _analyze_figures(self, figures: list[FigureInfo], show_progress: bool = True) -> list[str]:
+        """Populate figure descriptions in place; return analysis-failure messages.
+
+        A caption the model could not produce is still embedded in the body as
+        ``[Analysis Error: ...]`` (so the user sees it), AND surfaced in the
+        returned list so the caller can fold it into ``figure_errors`` — a doc
+        the user explicitly asked to ``--analyze-figures`` must NOT record
+        ``completed``/exit 0 when its captions failed.
+        """
         if not figures:
-            return
+            return []
+        errors: list[str] = []
         if self.workers == 1:
             iterator = (
                 tqdm(figures, desc="Analyzing figures", unit="fig")
@@ -267,6 +297,10 @@ class OCRProcessor:
             for fig in iterator:
                 desc, error = self._analyze_single_figure(fig)
                 fig.description = desc if not error else f"[Analysis Error: {error}]"
+                if error:
+                    errors.append(
+                        f"figure {fig.figure_num} on page {fig.page_num}: analysis failed: {error}"
+                    )
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
                 futures = {
@@ -283,10 +317,16 @@ class OCRProcessor:
                     fig = futures[future]
                     desc, error = future.result()
                     fig.description = desc if not error else f"[Analysis Error: {error}]"
+                    if error:
+                        errors.append(
+                            f"figure {fig.figure_num} on page {fig.page_num}: "
+                            f"analysis failed: {error}"
+                        )
                     if pbar:
                         pbar.update(1)
                 if pbar:
                     pbar.close()
+        return errors
 
     def _figures_to_markdown(self, figures: list[FigureInfo]) -> str:
         """Render figure analyses as a trailing markdown section with canonical links."""
@@ -387,11 +427,14 @@ class OCRProcessor:
                 pages, page_errors = self._ocr_pages(images, prompt, show_progress)
 
                 figures_md = ""
+                figure_errors: list[str] = []
                 if self.analyze_figures:
                     figures = self._extract_figures_from_pdf(file_path)
                     if figures:
-                        self._save_figures(figures, doc_dir)
-                        self._analyze_figures(figures, show_progress=show_progress)
+                        figure_errors.extend(self._save_figures(figures, doc_dir))
+                        figure_errors.extend(
+                            self._analyze_figures(figures, show_progress=show_progress)
+                        )
                         figures_md = self._figures_to_markdown(figures)
 
                 return DocResult(
@@ -400,6 +443,7 @@ class OCRProcessor:
                     figures_md=figures_md,
                     processing_time=time.time() - start,
                     page_errors=page_errors,
+                    figure_errors=figure_errors,
                 )
 
             # Single image input -> one page.
@@ -422,19 +466,43 @@ class OCRProcessor:
     # ------------------------------------------------------------------
 
     def fingerprint(self, prompt: str | None) -> str:
-        """Run-config fingerprint for the cache key (model/backend/task/prompt).
+        """Run-config fingerprint for the cache key.
 
-        Lets :meth:`RootIndex.is_completed` invalidate when any of these change so
-        a re-run under a different model/backend/task/prompt reprocesses instead
-        of silently reusing the prior output (the idempotency gap the audit
-        flagged). ``task`` is omitted when a custom ``prompt`` overrides it (the
-        prompt then fully determines what the model is asked to do).
+        Lets :meth:`RootIndex.is_completed` invalidate when any output-affecting
+        run parameter changes, so a re-run under a different configuration
+        reprocesses instead of silently reusing the prior output (the idempotency
+        gap the audit flagged). Keyed on model / backend / task / prompt PLUS the
+        engine's output-affecting flags via ``extra``:
+
+        * ``raw`` — genuinely changes page text (``return_raw`` skips cleaning);
+        * ``dpi`` / ``max_dim`` — change the rendered pixels fed to the model, so
+          a re-run at a different resolution must re-OCR;
+        * ``analyze_figures`` / ``extract_images`` — request new side outputs
+          (figure captions / page rasters) that a prior run never produced.
+
+        Without these in the key, a clean completed run would be silently skipped
+        when re-run with ``--raw`` / a different ``--dpi``/``--max-dim`` / or
+        ``--analyze-figures``/``--extract-images``, reusing stale markdown and
+        never producing the newly requested outputs (exit 0).
+
+        ``task`` is omitted when a custom ``prompt`` overrides it (the prompt then
+        fully determines what the model is asked to do). All ``extra`` values are
+        the RESOLVED effective flags (incl. falsy ones), so ``run_fingerprint``'s
+        canonical JSON encoding keeps ``True``/``False`` distinct and key order
+        irrelevant.
         """
         fp: str = run_fingerprint(
             model=self._backend.model_name,
             backend=self._backend.backend_name,
             task=None if prompt else self.task,
             prompt=prompt,
+            extra={
+                "raw": self.raw,
+                "dpi": self.dpi,
+                "max_dim": self._backend.max_dimension,
+                "analyze_figures": self.analyze_figures,
+                "extract_images": self.extract_images,
+            },
         )
         return fp
 
@@ -448,15 +516,21 @@ class OCRProcessor:
         status = result.status
         error = None
         if status is not Status.COMPLETED:
-            if result.page_errors:
-                error = "; ".join(
-                    f"page {n}: {msg}" for n, msg in sorted(result.page_errors.items())
-                )
-            elif result.error:
+            if result.error:
                 error = result.error
+            else:
+                # Surface BOTH channels so a figure-only failure (clean pages but
+                # a save/analysis error) is never an empty diagnostic.
+                parts = [f"page {n}: {msg}" for n, msg in sorted(result.page_errors.items())]
+                parts.extend(result.figure_errors)
+                error = "; ".join(parts) if parts else None
+        # Checksum the input WITHOUT raising: if the source became unreadable
+        # (the SYS-02 path), still persist a status=failed record rather than
+        # letting the failure-metadata write itself throw and abort the batch.
+        checksum = safe_checksum(result.source) or "sha256:unreadable"
         return DocMetadata(
             status=status,
-            checksum=sha256_checksum(result.source),
+            checksum=checksum,
             model=self._backend.model_name,
             backend=self._backend.backend_name,
             processing_time=result.processing_time,
@@ -553,17 +627,31 @@ def process(
     iterator = tqdm(files, desc="Processing files") if (show_progress and len(files) > 1) else files
     for file_path in iterator:
         rel_key = relative_key(file_path, scan_root)
-        markdown_path = markdown_path_for(doc_dir_for(output_root, rel_key), rel_key)
-        if not reprocess and index.is_completed(
-            rel_key, sha256_checksum(file_path), fingerprint=fingerprint
-        ):
+        doc_dir = doc_dir_for(output_root, rel_key)
+        markdown_path = markdown_path_for(doc_dir, rel_key)
+
+        # SYS-02: checksum the input WITHOUT aborting the batch. A file that
+        # became unreadable between discovery and processing (permission denied,
+        # deleted/replaced mid-run, broken symlink) yields None here; we record
+        # that one document as status=failed and continue, rather than letting an
+        # OSError propagate and kill the whole run.
+        checksum = safe_checksum(file_path)
+        if checksum is None:
+            logger.error(f"failed to read {rel_key}: input unreadable")
+            result = DocResult(source=file_path, error="input unreadable")
+            meta, markdown_path = processor.write_document(
+                result, output_root, rel_key, doc_dir, index, prompt=prompt
+            )
+            outcome.add(meta.status, detail=rel_key, output_path=str(markdown_path))
+            continue
+
+        if not reprocess and index.is_completed(rel_key, checksum, fingerprint=fingerprint):
             logger.info(f"skip {rel_key} (already completed; use --reprocess)")
             # Emit the existing .md path even on a cached skip so quiet-mode
             # scripting (`glm-ocr dir -q | xargs ...`) still sees every doc.
             outcome.add(Status.COMPLETED, output_path=str(markdown_path))
             continue
 
-        doc_dir = doc_dir_for(output_root, rel_key)
         result = processor.process_file(
             file_path, doc_dir, prompt=prompt, show_progress=show_progress
         )

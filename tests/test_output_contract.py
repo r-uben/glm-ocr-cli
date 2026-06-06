@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import fitz
 from ocr_output_contract.conformance import ExpectedDoc, assert_conforms
@@ -404,3 +405,231 @@ def test_raw_mode_skips_cleaning(tmp_path):
     assert seen_raw == [True]
     body = (out / "doc" / "doc.md").read_text()
     assert "<b>kept</b>" in body
+
+
+# ---------------------------------------------------------------------------
+# HIGH (round-2): the idempotency fingerprint must include EVERY output-affecting
+# flag, so a re-run that changes the output is reprocessed, never silently
+# skipped. One test per flag: changing it must invalidate the cache (the backend
+# is called again on the second run).
+# ---------------------------------------------------------------------------
+
+
+def _make_pdf_with_figure(path):
+    """A 1-page PDF carrying an embedded image (so --analyze-figures has work)."""
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=400)
+    page.insert_text((40, 60), "Source page 1")
+    img = Image.new("RGB", (40, 40), "blue")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    page.insert_image(fitz.Rect(100, 100, 180, 180), stream=buf.getvalue())
+    doc.save(path)
+    doc.close()
+
+
+def _run_then_rerun(pdf, out, first_kwargs, second_kwargs):
+    """Run twice (fresh backend each time) and return the 2nd run's call count.
+
+    A nonzero count means the second invocation was NOT skipped, i.e. the flag
+    change invalidated the fingerprint and the doc was reprocessed.
+    """
+    b1 = FakeBackend()
+    for k, v in first_kwargs.pop("_backend_attrs", {}).items():
+        setattr(b1, k, v)
+    process(pdf, b1, output_dir=out, show_progress=False, **first_kwargs)
+
+    b2 = FakeBackend()
+    for k, v in second_kwargs.pop("_backend_attrs", {}).items():
+        setattr(b2, k, v)
+    process(pdf, b2, output_dir=out, show_progress=False, **second_kwargs)
+    return len(b2.tasks_seen)
+
+
+def test_rerun_under_different_raw_reprocesses(tmp_path):
+    """--raw changes page text (verbatim vs cleaned); flipping it must reprocess."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf(pdf, pages=1)
+    out = tmp_path / "out"
+
+    n = _run_then_rerun(pdf, out, {"raw": False}, {"raw": True})
+    assert n == 1, "flipping --raw must invalidate the fingerprint and reprocess"
+
+
+def test_rerun_under_different_dpi_reprocesses(tmp_path):
+    """A different --dpi renders different pixels; the cache must not be reused."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf(pdf, pages=1)
+    out = tmp_path / "out"
+
+    n = _run_then_rerun(pdf, out, {"dpi": 200}, {"dpi": 300})
+    assert n == 1, "changing --dpi must invalidate the fingerprint and reprocess"
+
+
+def test_rerun_under_different_max_dim_reprocesses(tmp_path):
+    """--max-dim (carried on the backend) changes rendered pixels; must reprocess."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf(pdf, pages=1)
+    out = tmp_path / "out"
+
+    n = _run_then_rerun(
+        pdf,
+        out,
+        {"_backend_attrs": {"max_dimension": 2048}},
+        {"_backend_attrs": {"max_dimension": 1024}},
+    )
+    assert n == 1, "changing --max-dim must invalidate the fingerprint and reprocess"
+
+
+def test_rerun_under_different_analyze_figures_reprocesses(tmp_path):
+    """--analyze-figures requests a NEW side output; enabling it must reprocess."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf_with_figure(pdf)
+    out = tmp_path / "out"
+
+    # >=1 (not ==1): with --analyze-figures the second run makes an EXTRA
+    # backend call for the figure caption on top of the page-OCR call, so the
+    # count is >1. The point is it reprocessed at all (was not skipped).
+    n = _run_then_rerun(pdf, out, {"analyze_figures": False}, {"analyze_figures": True})
+    assert n >= 1, "enabling --analyze-figures must invalidate the fingerprint and reprocess"
+
+
+def test_rerun_under_different_extract_images_reprocesses(tmp_path):
+    """--extract-images requests page rasters a prior run never produced; reprocess."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf(pdf, pages=1)
+    out = tmp_path / "out"
+
+    n = _run_then_rerun(pdf, out, {"extract_images": False}, {"extract_images": True})
+    assert n == 1, "enabling --extract-images must invalidate the fingerprint and reprocess"
+
+
+def test_same_flags_still_skips(tmp_path):
+    """Control: identical output-affecting flags on a re-run are STILL skipped
+    (the richer fingerprint did not break idempotency for unchanged configs)."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf(pdf, pages=1)
+    out = tmp_path / "out"
+
+    n = _run_then_rerun(
+        pdf,
+        out,
+        {"raw": True, "dpi": 150, "_backend_attrs": {"max_dimension": 1024}},
+        {"raw": True, "dpi": 150, "_backend_attrs": {"max_dimension": 1024}},
+    )
+    assert n == 0, "identical flags must remain idempotent (skipped on re-run)"
+
+
+# ---------------------------------------------------------------------------
+# LOW (round-2): a figure-save failure must be VISIBLE — it degrades the doc to
+# partial (not a silent completed) and drives a nonzero exit, with a non-empty
+# diagnostic in the metadata.
+# ---------------------------------------------------------------------------
+
+
+def test_figure_save_failure_degrades_status_and_exits_nonzero(tmp_path, monkeypatch):
+    """A failing figure save -> status=partial, nonzero exit, diagnostic recorded.
+
+    Pages OCR cleanly, so without surfacing the figure-save failure the doc would
+    record a silent ``completed``/exit 0 despite the user asking for figures.
+    """
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf_with_figure(pdf)
+    out = tmp_path / "out"
+
+    # Force PIL Image.save to raise so the figure cannot be written to disk.
+    real_save = Image.Image.save
+
+    def boom(self, *args, **kwargs):
+        raise OSError("disk full (simulated)")
+
+    monkeypatch.setattr(Image.Image, "save", boom)
+    try:
+        outcome = process(
+            pdf, FakeBackend(), output_dir=out, analyze_figures=True, show_progress=False
+        )
+    finally:
+        monkeypatch.setattr(Image.Image, "save", real_save)
+
+    # The figure-save failure is VISIBLE: nonzero exit, partial status.
+    assert outcome.exit_code != 0, "a figure-save failure must drive a nonzero exit"
+    assert_conforms(
+        out,
+        [ExpectedDoc(rel_key="doc.pdf", pages=1, status="partial")],
+        require_failures_nonzero_exit=True,
+    )
+    doc_meta = json.loads((out / "doc" / "metadata.json").read_text())
+    assert doc_meta["status"] == "partial"
+    assert doc_meta.get("error"), "the partial must carry a non-empty diagnostic"
+    assert "save failed" in doc_meta["error"]
+
+
+def test_figure_analysis_failure_degrades_status_and_exits_nonzero(tmp_path):
+    """A failing figure CAPTION (under --analyze-figures) is likewise visible:
+    status=partial + nonzero exit, not a silent completed."""
+    pdf = tmp_path / "doc.pdf"
+    _make_pdf_with_figure(pdf)
+    out = tmp_path / "out"
+
+    class CaptionFails(FakeBackend):
+        def process_image(self, image, prompt=None, task="text", return_raw=False):
+            # Page OCR (task='text') succeeds; the figure caption call (the long
+            # description prompt, task default) raises.
+            if prompt and "Describe" in prompt:
+                raise RuntimeError("caption model unavailable")
+            return "page text"
+
+    outcome = process(
+        pdf, CaptionFails(), output_dir=out, analyze_figures=True, show_progress=False
+    )
+    assert outcome.exit_code != 0
+    assert_conforms(
+        out,
+        [ExpectedDoc(rel_key="doc.pdf", pages=1, status="partial")],
+        require_failures_nonzero_exit=True,
+    )
+    doc_meta = json.loads((out / "doc" / "metadata.json").read_text())
+    assert doc_meta["status"] == "partial"
+    assert "analysis failed" in (doc_meta.get("error") or "")
+
+
+# ---------------------------------------------------------------------------
+# SYS-02 (round-2): an unreadable input in the idempotency pre-check must NOT
+# abort the batch — it is recorded as a per-file failure and the run continues.
+# ---------------------------------------------------------------------------
+
+
+def test_unreadable_input_records_failed_and_continues_batch(tmp_path, monkeypatch):
+    """One unreadable file -> recorded status=failed, the other files still run.
+
+    The pre-check uses safe_checksum, so an OSError on one input does not
+    propagate and kill the whole batch (the SYS-02 'one bad file aborts the
+    batch' failure mode)."""
+    root = tmp_path / "in"
+    root.mkdir()
+    good = root / "good.pdf"
+    bad = root / "bad.pdf"
+    _make_pdf(good, pages=1)
+    _make_pdf(bad, pages=1)
+    out = tmp_path / "out"
+
+    from ocr_output_contract import contract as _contract
+
+    real_checksum = _contract.sha256_checksum
+
+    def selective(path):
+        if Path(path).name == "bad.pdf":
+            raise PermissionError("permission denied (simulated)")
+        return real_checksum(path)
+
+    # Patch the symbol used by safe_checksum inside the contract module.
+    monkeypatch.setattr(_contract, "sha256_checksum", selective)
+
+    outcome = process(root, FakeBackend(), output_dir=out, show_progress=False)
+
+    # The batch did NOT abort: the good file completed, the bad one is recorded.
+    assert outcome.exit_code != 0
+    assert (out / "good" / "good.md").exists()
+    index = json.loads((out / "metadata.json").read_text())
+    assert index["files"]["good.pdf"]["status"] == "completed"
+    assert index["files"]["bad.pdf"]["status"] == "failed"
