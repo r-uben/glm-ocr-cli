@@ -14,6 +14,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         env_prefix="GLM_OCR_",
         case_sensitive=False,
+        # Tolerate stale/removed keys in a user's .env (e.g. the dropped
+        # GLM_OCR_OUTPUT_DIR / GLM_OCR_INCLUDE_METADATA fields). pydantic-settings
+        # defaults to extra="forbid"; since Settings() runs at import time, a
+        # forbidden extra key would raise a ValidationError on EVERY command
+        # (even --help) and crash the CLI for any existing user on upgrade.
+        extra="ignore",
     )
 
     # Backend selection

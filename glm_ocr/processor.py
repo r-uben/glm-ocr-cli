@@ -40,6 +40,7 @@ from ocr_output_contract import (
     markdown_path_for,
     relative_key,
     resolve_output_root,
+    run_fingerprint,
     sha256_checksum,
     utc_timestamp,
     write_doc_metadata,
@@ -117,6 +118,7 @@ class OCRProcessor:
         workers: int = 1,
         analyze_figures: bool = False,
         task: str = "text",
+        raw: bool = False,
     ):
         if backend is not None:
             self._backend = backend
@@ -131,6 +133,7 @@ class OCRProcessor:
         self.workers = max(1, workers)
         self.analyze_figures = analyze_figures
         self.task = task
+        self.raw = raw
 
     # ------------------------------------------------------------------
     # Rendering / figure extraction (engine-owned)
@@ -319,7 +322,9 @@ class OCRProcessor:
         page_errors: dict[int, str] = {}
 
         def ocr_one(idx: int, image: Image.Image) -> str:
-            text = self._backend.process_image(image, prompt=prompt, task=self.task)
+            text = self._backend.process_image(
+                image, prompt=prompt, task=self.task, return_raw=self.raw
+            )
             if not text or not text.strip():
                 raise ValueError("empty OCR response (no text returned)")
             return text
@@ -416,8 +421,29 @@ class OCRProcessor:
     # Output writing (all routed through the contract)
     # ------------------------------------------------------------------
 
+    def fingerprint(self, prompt: str | None) -> str:
+        """Run-config fingerprint for the cache key (model/backend/task/prompt).
+
+        Lets :meth:`RootIndex.is_completed` invalidate when any of these change so
+        a re-run under a different model/backend/task/prompt reprocesses instead
+        of silently reusing the prior output (the idempotency gap the audit
+        flagged). ``task`` is omitted when a custom ``prompt`` overrides it (the
+        prompt then fully determines what the model is asked to do).
+        """
+        fp: str = run_fingerprint(
+            model=self._backend.model_name,
+            backend=self._backend.backend_name,
+            task=None if prompt else self.task,
+            prompt=prompt,
+        )
+        return fp
+
     def _build_doc_metadata(
-        self, result: DocResult, markdown_path: Path, output_root: Path
+        self,
+        result: DocResult,
+        markdown_path: Path,
+        output_root: Path,
+        prompt: str | None,
     ) -> DocMetadata:
         status = result.status
         error = None
@@ -438,6 +464,7 @@ class OCRProcessor:
             output_path=str(markdown_path.relative_to(output_root)),
             pages=result.page_count,
             error=error,
+            fingerprint=self.fingerprint(prompt),
         )
 
     def write_document(
@@ -447,6 +474,7 @@ class OCRProcessor:
         rel_key: str,
         doc_dir: Path,
         index: RootIndex,
+        prompt: str | None = None,
     ) -> tuple[DocMetadata, Path]:
         """Write the aggregated markdown + BOTH metadata levels for one document.
 
@@ -462,7 +490,7 @@ class OCRProcessor:
             body = body + result.figures_md
         markdown_path.write_text(body, encoding="utf-8")
 
-        meta = self._build_doc_metadata(result, markdown_path, output_root)
+        meta = self._build_doc_metadata(result, markdown_path, output_root, prompt)
         write_doc_metadata(doc_dir, rel_key, meta)
         index.record(rel_key, meta)
         return meta, markdown_path
@@ -473,7 +501,6 @@ def process(
     backend: Backend,
     output_dir: Path | None = None,
     *,
-    recursive: bool = False,
     prompt: str | None = None,
     task: str = "text",
     extract_images: bool = False,
@@ -481,6 +508,7 @@ def process(
     dpi: int = 200,
     workers: int = 1,
     reprocess: bool = False,
+    raw: bool = False,
     show_progress: bool = True,
 ) -> RunOutcome:
     """Process an input (file or directory) through the canonical contract.
@@ -489,12 +517,19 @@ def process(
     ``<input-parent>/ocr/``; ``-o`` overrides; never required. Returns a
     :class:`RunOutcome` whose ``exit_code`` is nonzero if any document/page
     failed (uniform across single-file and batch, canon §6).
+
+    The output root is resolved BEFORE discovery and passed into
+    :func:`collect_files`, so the discovery walk excludes the resolved output
+    subtree and never re-ingests the engine's own ``.md`` / figure / page-raster
+    outputs as inputs on a re-run (the HIGH self-ingestion bug). Directory inputs
+    are always walked recursively.
     """
-    files = collect_files(source, recursive=recursive)
+    output_root = resolve_output_root(source, output_dir)
+
+    files = collect_files(source, output_dir=output_root)
     if not files:
         raise ValueError(f"no supported files found at {source}")
 
-    output_root = resolve_output_root(source, output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     scan_root = source.parent if source.is_file() else source
     index = RootIndex(output_root)
@@ -507,22 +542,34 @@ def process(
         workers=workers,
         analyze_figures=analyze_figures,
         task=task,
+        raw=raw,
     )
+
+    # Run-config fingerprint: a doc completed under a different model/backend/
+    # task/prompt is reprocessed (idempotency keyed on input AND run config).
+    fingerprint = processor.fingerprint(prompt)
 
     outcome = RunOutcome()
     iterator = tqdm(files, desc="Processing files") if (show_progress and len(files) > 1) else files
     for file_path in iterator:
         rel_key = relative_key(file_path, scan_root)
-        if not reprocess and index.is_completed(rel_key, sha256_checksum(file_path)):
+        markdown_path = markdown_path_for(doc_dir_for(output_root, rel_key), rel_key)
+        if not reprocess and index.is_completed(
+            rel_key, sha256_checksum(file_path), fingerprint=fingerprint
+        ):
             logger.info(f"skip {rel_key} (already completed; use --reprocess)")
-            outcome.add(Status.COMPLETED)
+            # Emit the existing .md path even on a cached skip so quiet-mode
+            # scripting (`glm-ocr dir -q | xargs ...`) still sees every doc.
+            outcome.add(Status.COMPLETED, output_path=str(markdown_path))
             continue
 
         doc_dir = doc_dir_for(output_root, rel_key)
         result = processor.process_file(
             file_path, doc_dir, prompt=prompt, show_progress=show_progress
         )
-        meta, markdown_path = processor.write_document(result, output_root, rel_key, doc_dir, index)
+        meta, markdown_path = processor.write_document(
+            result, output_root, rel_key, doc_dir, index, prompt=prompt
+        )
         outcome.add(
             meta.status,
             detail=None if meta.status is Status.COMPLETED else rel_key,

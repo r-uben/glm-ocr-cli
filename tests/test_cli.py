@@ -1,8 +1,31 @@
 """Tests for GLM-OCR CLI."""
 
+import importlib
+
 from click.testing import CliRunner
 
 from glm_ocr.cli import cli
+
+
+def test_stale_env_file_does_not_crash_cli(tmp_path, monkeypatch):
+    """End-to-end: a .env with a removed key must not crash even `--help`.
+
+    Settings() runs at import time; without extra="ignore" pydantic-settings
+    raises a ValidationError before Click ever runs, breaking every command.
+    Re-import config in the dir holding the stale .env to exercise that path.
+    """
+    env = tmp_path / ".env"
+    env.write_text("GLM_OCR_OUTPUT_DIR=/old/removed/path\nGLM_OCR_BACKEND=ollama\n")
+    monkeypatch.chdir(tmp_path)
+
+    import glm_ocr.config as config
+
+    # Reconstruct Settings from the on-disk .env in cwd; must not raise.
+    reloaded = importlib.reload(config)
+    assert reloaded.Settings().backend == "ollama"
+
+    result = CliRunner().invoke(cli, ["--help"])
+    assert result.exit_code == 0
 
 
 class TestCLI:

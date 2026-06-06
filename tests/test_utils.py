@@ -51,16 +51,45 @@ class TestCollectFiles:
         assert len(files) == 2
 
     def test_recursive(self, tmp_path):
+        """Directory inputs are always walked recursively now."""
         sub = tmp_path / "sub"
         sub.mkdir()
         (tmp_path / "a.pdf").touch()
         (sub / "b.pdf").touch()
-        files = collect_files(tmp_path, recursive=True)
+        files = collect_files(tmp_path)
         assert len(files) == 2
 
     def test_empty_raises(self, tmp_path):
         with pytest.raises(ValueError):
             collect_files(tmp_path)
+
+    def test_excludes_resolved_output_root(self, tmp_path):
+        """The resolved output subtree is pruned so saved PNG/MD outputs from a
+        prior run are never re-ingested as fresh inputs (HIGH self-ingestion)."""
+        # A real input plus a prior-run output tree under the default <input>/ocr/.
+        (tmp_path / "paper.pdf").touch()
+        ocr_dir = tmp_path / "ocr" / "paper" / "images"
+        ocr_dir.mkdir(parents=True)
+        (ocr_dir / "page_0001.png").touch()
+        (tmp_path / "ocr" / "paper" / "paper.md").touch()
+        figures = tmp_path / "ocr" / "paper" / "figures"
+        figures.mkdir(parents=True)
+        (figures / "figure_1_page1.png").touch()
+
+        files = collect_files(tmp_path)
+        # Only the real input survives; nothing under <input>/ocr/ is discovered.
+        assert [f.name for f in files] == ["paper.pdf"]
+
+    def test_excludes_custom_output_root_inside_input(self, tmp_path):
+        """A custom -o dir inside the input tree is also pruned (resolved-path
+        match, not a literal 'ocr' name match)."""
+        (tmp_path / "paper.pdf").touch()
+        out = tmp_path / "results"
+        (out / "paper").mkdir(parents=True)
+        (out / "paper" / "fig.png").touch()
+
+        files = collect_files(tmp_path, output_dir=out)
+        assert [f.name for f in files] == ["paper.pdf"]
 
 
 class TestSanitizeFilename:

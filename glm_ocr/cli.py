@@ -46,9 +46,14 @@ def _get_pdf_page_count(path: Path) -> int:
         return len(doc)
 
 
-def _run_dry_run(input_path: Path, recursive: bool, quiet: bool) -> None:
-    """List files that would be processed without actually processing them."""
-    files = collect_files(input_path, recursive=recursive)
+def _run_dry_run(input_path: Path, output_dir: Path | None, quiet: bool) -> None:
+    """List files that would be processed without actually processing them.
+
+    Uses the SAME discovery the real run uses (recursive walk with the resolved
+    output root excluded), so the dry-run preview matches actual processing and
+    surfaces the output-root exclusion.
+    """
+    files = collect_files(input_path, output_dir=output_dir)
 
     if quiet:
         for f in files:
@@ -117,7 +122,12 @@ def cli(ctx: click.Context) -> None:
     default=None,
     help="Output root (default: <input-parent>/ocr/). Writes <stem>/<stem>.md per document.",
 )
-@click.option("-r", "--recursive", is_flag=True, help="Recursively process directories")
+@click.option(
+    "-r",
+    "--recursive",
+    is_flag=True,
+    help="Reserved (no-op): directory inputs are always walked recursively.",
+)
 @click.option(
     "--model",
     "model_name",
@@ -165,6 +175,11 @@ def cli(ctx: click.Context) -> None:
 )
 @click.option("--reprocess", is_flag=True, help="Force re-OCR of already-completed files.")
 @click.option(
+    "--raw",
+    is_flag=True,
+    help="Return verbatim model output (skip all output cleaning).",
+)
+@click.option(
     "--dry-run", is_flag=True, help="List files that would be processed without running OCR."
 )
 @click.option(
@@ -191,6 +206,7 @@ def process_cmd(
     backend: str | None,
     vllm_base_url: str | None,
     reprocess: bool,
+    raw: bool,
     dry_run: bool,
     quiet: bool,
     verbose: bool,
@@ -214,7 +230,7 @@ def process_cmd(
     if dry_run:
         print_banner(quiet=quiet)
         try:
-            _run_dry_run(input_path, recursive=recursive, quiet=quiet)
+            _run_dry_run(input_path, output_dir=output_dir, quiet=quiet)
         except Exception as e:
             err_console.print(f"[red]error:[/red] {e}")
             sys.exit(1)
@@ -240,7 +256,6 @@ def process_cmd(
             input_path,
             backend_instance,
             output_dir=output_dir,
-            recursive=recursive,
             prompt=prompt,
             task=task,
             extract_images=extract_images,
@@ -248,6 +263,7 @@ def process_cmd(
             dpi=dpi,
             workers=workers,
             reprocess=reprocess,
+            raw=raw,
             show_progress=not verbose and not quiet,
         )
 

@@ -4,6 +4,7 @@ import logging
 import re
 from pathlib import Path
 
+from ocr_output_contract import iter_input_files, resolve_output_root
 from PIL import Image
 
 # Supported file extensions
@@ -45,30 +46,38 @@ def is_pdf_file(file_path: Path) -> bool:
     return file_path.suffix.lower() == PDF_EXTENSION
 
 
-def collect_files(input_path: Path, recursive: bool = False) -> list[Path]:
+def collect_files(input_path: Path, output_dir: Path | None = None) -> list[Path]:
+    """Discover supported input files under ``input_path``, excluding outputs.
+
+    Discovery is delegated to the contract's :func:`iter_input_files`, which
+    recurses the tree and PRUNES the resolved output-root subtree so a re-run
+    never re-ingests its own saved ``.md`` / figure / page-raster PNG outputs as
+    fresh inputs (the HIGH self-ingestion bug). The output root is resolved here
+    via the same :func:`resolve_output_root` the writer uses, so the exclusion
+    targets the *real* output directory (``<input>/ocr/`` by default, or the
+    ``-o`` override), not a path component that merely happens to be named
+    ``ocr`` — important under the user's own ``.../toolkits/ocr/...`` tree.
+
+    Discovery is always recursive for directory inputs (the old ``recursive``
+    flag is dropped): batch trees are walked in full and the output subtree is
+    the only thing excluded.
+    """
     if not input_path.exists():
         raise FileNotFoundError(f"Path not found: {input_path}")
 
-    files: list[Path] = []
+    if input_path.is_file() and not is_supported_file(input_path):
+        raise ValueError(
+            f"Unsupported file type: {input_path.suffix}. "
+            f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
 
-    if input_path.is_file():
-        if is_supported_file(input_path):
-            files.append(input_path)
-        else:
-            raise ValueError(
-                f"Unsupported file type: {input_path.suffix}. "
-                f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
-            )
-    elif input_path.is_dir():
-        pattern = "**/*" if recursive else "*"
-        for file_path in input_path.glob(pattern):
-            if file_path.is_file() and is_supported_file(file_path):
-                files.append(file_path)
+    output_root = resolve_output_root(input_path, output_dir)
+    files = list(iter_input_files(input_path, output_root, suffixes=SUPPORTED_EXTENSIONS))
 
     if not files:
         raise ValueError(f"No supported files found in: {input_path}")
 
-    return sorted(files)
+    return files
 
 
 def load_image(image_path: Path) -> Image.Image:
